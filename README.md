@@ -1,4 +1,4 @@
-# Wispbyte Server Auto-Restart Monitor
+# Wispbyte Watchdog
 
 利用 **Cloudflare Workers + KV** 每 5 分钟自动检查 wispbyte 服务器状态，掉线时自动调用 start API 重启。
 
@@ -115,10 +115,10 @@ Cloudflare Workers 免费套餐包含：
 wispbyte-watchdog/
 ├── src/
 │   └── worker.js           # Worker 主逻辑
-├── .env                    # 本地凭据（不提交到 git）
+├── .env                    # 本地凭据（不提交）
 ├── .env.example            # 凭据模板（可安全提交）
 ├── .gitignore
 ├── Makefile                # 常用操作命令
-├── wrangler.toml           # 由 make deploy 自动生成（不提交到 git）
+├── wrangler.toml           # 由 make deploy 自动生成（不提交）
 └── wrangler.toml.example   # Cloudflare 配置模板（可安全提交）
 ```
