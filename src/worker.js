@@ -65,6 +65,30 @@ async function run(env) {
 }
 
 /**
+ * 解析 Socket.IO EIO4 数据包，返回服务器状态字符串或 null
+ */
+function parseSocketPackets(text, log) {
+  for (const packet of text.split('\u001e')) {
+    if (!packet.startsWith('42')) continue;
+    try {
+      const arr = JSON.parse(packet.slice(2));
+      if (arr[0] === 'serverStatus' && typeof arr[1] === 'string') {
+        log.push(`Socket.IO: serverStatus=${arr[1]}`);
+        return arr[1];
+      }
+      if (arr[0] === 'newMessage' && typeof arr[1] === 'string' && arr[1].includes('"event":"stats"')) {
+        const stats = JSON.parse(JSON.parse(arr[1]).args[0]);
+        if (stats.state) {
+          log.push(`Socket.IO: stats state=${stats.state}`);
+          return stats.state;
+        }
+      }
+    } catch (_) {}
+  }
+  return null;
+}
+
+/**
  * 通过 Socket.IO 长轮询获取实时服务器状态
  * 协议：Engine.IO v4 长轮询 + Socket.IO v4
  */
@@ -122,23 +146,20 @@ async function getServerStateViaSocketIO(serverId, cookie, log, env) {
     const pollUrl = `${SOCKET_BASE}/socket.io/?EIO=4&transport=polling&sid=${sid}`;
     const postHeaders = { ...headers, 'Content-Type': 'text/plain;charset=UTF-8' };
 
-    // Step 3: 初次 GET（接收 server ping）
-    const poll1Resp = await fetch(pollUrl, { headers });
-    await poll1Resp.text();
-
-    // Step 4: POST pong(3) + Socket.IO namespace connect(40)
+    // Step 3: POST Socket.IO namespace connect(40)
+    // 浏览器实测：握手后直接发 namespace connect，无需等待 server ping
     const connectResp = await fetch(pollUrl, {
       method: 'POST',
       headers: postHeaders,
-      body: '3\u001e40',
+      body: '40',
     });
     await connectResp.text();
 
-    // Step 5: GET namespace connect ack
+    // Step 4: GET namespace connect ack
     const poll2Resp = await fetch(pollUrl, { headers });
     await poll2Resp.text();
 
-    // Step 6: POST joinServer 事件
+    // Step 5: POST joinServer 事件
     const joinPayload = `42${JSON.stringify(['joinServer', serverId, token])}`;
     const joinResp = await fetch(pollUrl, {
       method: 'POST',
@@ -147,80 +168,26 @@ async function getServerStateViaSocketIO(serverId, cookie, log, env) {
     });
     await joinResp.text();
 
-    // Step 7: 长轮询等待 stats 事件（15 秒超时）
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 15000);
-
+    // Step 7: 轮询等待 serverStatus（最多 3 次，每次 3s 超时）
+    // 服务端事件顺序固定：第1次 poll 返回 auth success，第2次才返回 serverStatus
+    // 收到任何非目标消息后立即发起下一次 poll，无需等满超时
     let state = null;
-    try {
-      const poll3Resp = await fetch(pollUrl, { headers, signal: controller.signal });
-      clearTimeout(timeoutId);
-      const poll3Text = await poll3Resp.text();
-      log.push(`Socket.IO: poll=${poll3Text.substring(0, 100)}`);
-
-      // EIO4 多包用 \u001e 分隔
-      const packets = poll3Text.split('\u001e');
-      for (const packet of packets) {
-        if (!packet.startsWith('42')) continue;
-        try {
-          const arr = JSON.parse(packet.slice(2));
-          if (arr[0] === 'serverStatus' && typeof arr[1] === 'string') {
-            state = arr[1];
-            log.push(`Socket.IO: serverStatus=${state}`);
-            break;
-          }
-          if (arr[0] === 'newMessage' && typeof arr[1] === 'string' && arr[1].includes('"event":"stats"')) {
-            const msg = JSON.parse(arr[1]);
-            const stats = JSON.parse(msg.args[0]);
-            if (stats.state) {
-              state = stats.state;
-              log.push(`Socket.IO: stats state=${state}`);
-              break;
-            }
-          }
-        } catch (_) {}
-      }
-
-      if (!state) {
-        // 如果第一次 poll 没有 stats，再 poll 一次
-        const controller2 = new AbortController();
-        const timeoutId2 = setTimeout(() => controller2.abort(), 10000);
-        try {
-          const poll4Resp = await fetch(pollUrl, { headers, signal: controller2.signal });
-          clearTimeout(timeoutId2);
-          const poll4Text = await poll4Resp.text();
-          log.push(`Socket.IO: poll2=${poll4Text.substring(0, 100)}`);
-          const packets2 = poll4Text.split('\u001e');
-          for (const packet of packets2) {
-            if (!packet.startsWith('42')) continue;
-            try {
-              const arr = JSON.parse(packet.slice(2));
-              if (arr[0] === 'serverStatus' && typeof arr[1] === 'string') {
-                state = arr[1];
-                log.push(`Socket.IO: serverStatus=${state}`);
-                break;
-              }
-              if (arr[0] === 'newMessage' && typeof arr[1] === 'string' && arr[1].includes('"event":"stats"')) {
-                const msg = JSON.parse(arr[1]);
-                const stats = JSON.parse(msg.args[0]);
-                if (stats.state) {
-                  state = stats.state;
-                  log.push(`Socket.IO: stats state=${state}`);
-                  break;
-                }
-              }
-            } catch (_) {}
-          }
-        } catch (e2) {
-          if (e2.name !== 'AbortError') log.push(`Socket.IO: poll2 error: ${e2.message}`);
+    for (let attempt = 1; attempt <= 3 && !state; attempt++) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3000);
+      try {
+        const pollResp = await fetch(pollUrl, { headers, signal: controller.signal });
+        clearTimeout(timeoutId);
+        const pollText = await pollResp.text();
+        log.push(`Socket.IO: poll${attempt}=${pollText.substring(0, 120)}`);
+        state = parseSocketPackets(pollText, log);
+      } catch (e) {
+        clearTimeout(timeoutId);
+        if (e.name === 'AbortError') {
+          log.push(`Socket.IO: poll${attempt} timeout (3s)`);
+        } else {
+          log.push(`Socket.IO: poll${attempt} error: ${e.message}`);
         }
-      }
-    } catch (e) {
-      clearTimeout(timeoutId);
-      if (e.name === 'AbortError') {
-        log.push('Socket.IO: poll timeout - no stats received in 15s');
-      } else {
-        log.push(`Socket.IO: poll error: ${e.message}`);
       }
     }
 
