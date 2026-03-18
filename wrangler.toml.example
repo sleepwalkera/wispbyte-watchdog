@@ -1,0 +1,18 @@
+name = "wispbyte-watchdog"
+main = "src/worker.js"
+compatibility_date = "2024-01-01"
+
+# Cron 触发：每 5 分钟检查一次
+[triggers]
+crons = ["*/5 * * * *"]
+
+# KV 命名空间（部署前需先创建）
+# 创建命令：wrangler kv:namespace create MONITOR_KV
+[[kv_namespaces]]
+binding = "MONITOR_KV"
+id = "__KV_NAMESPACE_ID__"
+
+# 环境变量（均从 .env 读取，由 Makefile 注入）
+[vars]
+SERVER_ID = "__SERVER_ID__"
+# NOTIFY_WEBHOOK = "__NOTIFY_WEBHOOK__"  # 可选，取消注释并在 .env 中配置
