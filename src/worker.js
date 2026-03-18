@@ -16,6 +16,7 @@
 
 const BASE = 'https://wispbyte.com/client';
 const SOCKET_BASE = 'https://wispbyte.com';
+const USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 export default {
   async scheduled(event, env, ctx) {
@@ -45,19 +46,13 @@ async function run(env) {
 
   // 更新 cookie（如果续期了）
   if (updatedCookie && updatedCookie !== cookie) {
-    await env.MONITOR_KV.put('cookie', updatedCookie);
+    env.MONITOR_KV.put('cookie', updatedCookie);
     cookie = updatedCookie;
     log.push('Cookie renewed');
   }
 
   if (!state) {
-    log.push('Could not determine server state via Socket.IO, falling back to HTML');
-    // 降级：读取服务器列表页面的嵌入状态
-    const fallbackState = await getFallbackState(serverId, cookie, log, env);
-    if (!fallbackState) {
-      return { ok: false, error: 'Could not determine server state', log };
-    }
-    return await handleState(fallbackState, serverId, cookie, log, env);
+    return { ok: false, error: 'Could not determine server state via Socket.IO', log };
   }
 
   log.push(`Server ${serverId} state: ${state}`);
@@ -95,7 +90,7 @@ function parseSocketPackets(text, log) {
 async function getServerStateViaSocketIO(serverId, cookie, log, env) {
   const headers = {
     'Cookie': cookie,
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': USER_AGENT,
     'Accept': '*/*',
     'Origin': 'https://wispbyte.com',
     'Referer': `${BASE}/servers/${serverId}/console`,
@@ -198,56 +193,6 @@ async function getServerStateViaSocketIO(serverId, cookie, log, env) {
   }
 }
 
-/**
- * 降级方案：从 HTML 嵌入数据读取服务器状态（可能不是实时的）
- */
-async function getFallbackState(serverId, cookie, log, env) {
-  const serversResp = await fetch(`${BASE}/servers`, {
-    headers: {
-      'Cookie': cookie,
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    },
-    redirect: 'follow',
-  });
-
-  const html = await serversResp.text();
-
-  if (html.includes('Log In') && html.includes('Email or Username') && !html.includes('server-data-debug')) {
-    await notify(env, '⚠️ Wispbyte session expired! Please log in again and update the cookie in KV.');
-    return null;
-  }
-
-  const dataMatch =
-    html.match(/id="server-data-debug"[^>]*data-servers="([^"]+)"/) ||
-    html.match(/id="server-data-debug"[^>]*data-servers='([^']+)'/) ||
-    html.match(/data-servers="([^"]+)"[^>]*id="server-data-debug"/) ||
-    html.match(/data-servers='([^']+)'[^>]*id="server-data-debug"/);
-
-  if (!dataMatch) {
-    log.push('Fallback: could not find server-data-debug in HTML');
-    return null;
-  }
-
-  const jsonStr = dataMatch[1].replace(/&quot;/g, '"').replace(/&amp;/g, '&').replace(/&#39;/g, "'");
-  let servers;
-  try {
-    servers = JSON.parse(jsonStr);
-  } catch (e) {
-    log.push(`Fallback: JSON parse error: ${e.message}`);
-    return null;
-  }
-
-  const server = servers.find(s => s.attributes?.identifier === serverId);
-  if (!server) {
-    log.push(`Fallback: server ${serverId} not found in list`);
-    return null;
-  }
-
-  const state = server.attributes?.resources?.current_state;
-  log.push(`Fallback HTML state: ${state} (may be stale)`);
-  return state;
-}
 
 /**
  * 根据服务器状态决定是否需要重启
@@ -268,7 +213,7 @@ async function handleState(state, serverId, cookie, log, env) {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'X-Requested-With': 'XMLHttpRequest',
-      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent': USER_AGENT,
       'Referer': `${BASE}/servers/${serverId}/console`,
     },
     body: JSON.stringify({ serverId }),
